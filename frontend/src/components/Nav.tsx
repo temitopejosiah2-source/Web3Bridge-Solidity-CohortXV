@@ -1,19 +1,36 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { ConnectButton } from "./ConnectButton";
 
 const links = [
-  ["/", "Home"],
-  ["/ens", "ENS"],
-  ["/nft", "IPFS NFT"],
-  ["/aa", "Smart Account"],
+  ["/", "Studio"],
+  ["/ens", "ENS lookup"],
+  ["/nft", "Gallery"],
+  ["/activity", "Activity"],
 ];
 
 export function Nav() {
+  const pathname = usePathname();
+
   return (
-    <header className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
-      <nav className="flex flex-wrap gap-4 text-sm">
+    <header className="site-header">
+      <Link className="brand" href="/" aria-label="Mintroom home">
+        <span className="brand-mark" aria-hidden="true">M</span>
+        <span>
+          <span className="brand-name">MINTROOM</span>
+          <span className="brand-caption">ONCHAIN STUDIO</span>
+        </span>
+      </Link>
+      <nav className="nav-links" aria-label="Main navigation">
         {links.map(([href, label]) => (
-          <Link key={href} href={href} className="hover:underline">
+          <Link
+            key={href}
+            href={href}
+            className="nav-link"
+            aria-current={pathname === href ? "page" : undefined}
+          >
             {label}
           </Link>
         ))}

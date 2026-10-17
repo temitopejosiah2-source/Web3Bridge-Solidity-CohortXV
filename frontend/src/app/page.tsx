@@ -1,15 +1,40 @@
-import Link from "next/link";
+import { EnsLookup } from "@/components/EnsLookup";
+import { EthUsdPrice } from "@/components/EthUsdPrice";
+import { MintForm } from "@/components/MintForm";
+import { NftGallery } from "@/components/NftGallery";
 
 export default function Home() {
   return (
-    <div className="space-y-3">
-      <h1 className="text-2xl font-bold">Web3Bridge Day 3 dApp</h1>
-      <p>One app, three things a real dApp does:</p>
-      <ul className="list-disc space-y-1 pl-6">
-        <li><Link className="underline" href="/ens">ENS</Link>: show names instead of 0x addresses</li>
-        <li><Link className="underline" href="/nft">IPFS NFT</Link>: store a picture on IPFS and mint an NFT that points to it</li>
-        <li><Link className="underline" href="/aa">Smart Account</Link>: mint the same NFT from a smart account, with no gas</li>
-      </ul>
+    <div>
+      <section className="page-heading">
+        <div>
+          <p className="page-kicker">Ethereum Sepolia · Mainnet ENS</p>
+          <h1 className="page-title">Mintroom</h1>
+          <p className="page-subtitle">
+            Make a memory permanent. Pin your photo to IPFS, mint it on Sepolia, and let ENS put a name to its owner.
+          </p>
+          <div className="hero-badges" aria-label="Studio features">
+            <span><i aria-hidden="true" /> IPFS storage</span>
+            <span><i aria-hidden="true" /> ENS identities</span>
+            <span><i aria-hidden="true" /> Chainlink pricing</span>
+          </div>
+        </div>
+        <EthUsdPrice />
+      </section>
+      <div className="studio-grid">
+        <MintForm />
+        <EnsLookup />
+      </div>
+      <section className="section-space">
+        <div className="section-head">
+          <div>
+            <p className="page-kicker">From the chain</p>
+            <h2 className="section-title">Recent mints</h2>
+          </div>
+          <span className="pill">ClassNFT · Sepolia</span>
+        </div>
+        <NftGallery />
+      </section>
     </div>
   );
 }

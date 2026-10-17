@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 import { decodeFunctionData, type Hex } from "viem";
+import { entryPoint07Address } from "viem/account-abstraction";
 import { NFT_ADDRESS, nftAbi } from "@/contracts/nft";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
+export const dynamic = "force-dynamic";
 
+const RATE_LIMIT = 20;
+const RATE_WINDOW_MS = 60_000;
+const rateWindows = new Map<string, number[]>();
 const allowedMethods = new Set([
   "eth_chainId",
   "eth_estimateUserOperationGas",
@@ -14,7 +19,16 @@ const allowedMethods = new Set([
   "eth_supportedEntryPoints",
   "pm_getPaymasterData",
   "pm_getPaymasterStubData",
+  "pm_sponsorUserOperation",
   "pimlico_getUserOperationGasPrice",
+  "pimlico_getUserOperationStatus",
+]);
+const userOperationMethods = new Set([
+  "eth_estimateUserOperationGas",
+  "eth_sendUserOperation",
+  "pm_getPaymasterData",
+  "pm_getPaymasterStubData",
+  "pm_sponsorUserOperation",
 ]);
 
 const smartAccountBatchAbi = [
@@ -31,21 +45,11 @@ const smartAccountBatchAbi = [
   },
 ] as const;
 
-const sponsoredMethods = new Set([
-  "eth_estimateUserOperationGas",
-  "eth_sendUserOperation",
-  "pm_getPaymasterData",
-  "pm_getPaymasterStubData",
-]);
-
 function isAllowedMintBatch(callData: unknown) {
   if (typeof callData !== "string" || !/^0x([a-fA-F0-9]{2})+$/.test(callData)) return false;
 
   try {
-    const batch = decodeFunctionData({
-      abi: smartAccountBatchAbi,
-      data: callData as Hex,
-    });
+    const batch = decodeFunctionData({ abi: smartAccountBatchAbi, data: callData as Hex });
     if (batch.functionName !== "executeBatch") return false;
     const [destinations, values, functionCalls] = batch.args;
     if (destinations.length !== 2 || values.length !== 2 || functionCalls.length !== 2) return false;
@@ -54,8 +58,7 @@ function isAllowedMintBatch(callData: unknown) {
 
     const metadataUris = functionCalls.map((functionCall) => {
       const decoded = decodeFunctionData({ abi: nftAbi, data: functionCall });
-      if (decoded.functionName !== "mint") return undefined;
-      return decoded.args[0];
+      return decoded.functionName === "mint" ? decoded.args[0] : undefined;
     });
     return metadataUris.every((uri) => typeof uri === "string" && uri.startsWith("ipfs://"))
       && metadataUris[0] === metadataUris[1];
@@ -66,11 +69,8 @@ function isAllowedMintBatch(callData: unknown) {
 
 function isSameOrigin(request: Request) {
   const origin = request.headers.get("origin");
-  if (!origin) return false;
-
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  const host = forwardedHost ?? request.headers.get("host");
-  if (!host) return false;
+  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  if (!origin || !host) return false;
 
   try {
     return new URL(origin).host === host;
@@ -79,22 +79,48 @@ function isSameOrigin(request: Request) {
   }
 }
 
+function isRateLimited(request: Request) {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  const ip = request.headers.get("x-real-ip") ?? forwardedFor?.split(",")[0]?.trim() ?? "unknown";
+  const now = Date.now();
+  const recent = (rateWindows.get(ip) ?? []).filter((timestamp) => now - timestamp < RATE_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT) {
+    rateWindows.set(ip, recent);
+    return true;
+  }
+  recent.push(now);
+  rateWindows.set(ip, recent);
+
+  if (rateWindows.size > 5_000) {
+    for (const [key, timestamps] of rateWindows) {
+      if (!timestamps.length || now - timestamps[timestamps.length - 1] >= RATE_WINDOW_MS) {
+        rateWindows.delete(key);
+      }
+    }
+  }
+  return false;
+}
+
+function rpcError(id: unknown, code: number, message: string, status = 400) {
+  return NextResponse.json(
+    { jsonrpc: "2.0", id: id ?? null, error: { code, message } },
+    { status, headers: { "Cache-Control": "no-store" } },
+  );
+}
+
 export async function GET() {
-  return NextResponse.json({ configured: Boolean(process.env.PIMLICO_API_KEY) });
+  return NextResponse.json(
+    { configured: Boolean(process.env.PIMLICO_API_KEY), chainId: "0xaa36a7" },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }
 
 export async function POST(request: Request) {
-  const id: unknown = null;
   if (!isSameOrigin(request)) {
     return NextResponse.json({ error: "Cross-origin requests are not allowed." }, { status: 403 });
   }
-
-  const apiKey = process.env.PIMLICO_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { jsonrpc: "2.0", id, error: { code: -32000, message: "Pimlico is not configured for this deployment." } },
-      { status: 503 },
-    );
+  if (isRateLimited(request)) {
+    return NextResponse.json({ error: "Rate limit exceeded. Please retry in a minute." }, { status: 429 });
   }
 
   let payload: unknown;
@@ -112,46 +138,60 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "A single JSON-RPC request is required." }, { status: 400 });
   }
   const rpc = payload as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown };
-  if (rpc.jsonrpc !== "2.0" || !allowedMethods.has(String(rpc.method))) {
-    return NextResponse.json(
-      { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32601, message: "JSON-RPC method is not allowed." } },
-      { status: 400 },
-    );
+  const method = typeof rpc.method === "string" ? rpc.method : "";
+  if (rpc.jsonrpc !== "2.0" || !allowedMethods.has(method)) {
+    return rpcError(rpc.id, -32601, "JSON-RPC method is not allowed.");
   }
-  if (sponsoredMethods.has(String(rpc.method))) {
-    const params = rpc.params;
-    const userOperation = Array.isArray(params) && params[0] && typeof params[0] === "object"
-      ? params[0] as { callData?: unknown }
-      : undefined;
-    if (!isAllowedMintBatch(userOperation?.callData)) {
-      return NextResponse.json(
-        { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32602, message: "Only a two-call ClassNFT mint batch is allowed." } },
-        { status: 400 },
-      );
+  if (!Array.isArray(rpc.params)) {
+    return rpcError(rpc.id, -32602, "Invalid JSON-RPC parameters.");
+  }
+
+  if (method === "eth_chainId" && rpc.params.length !== 0) {
+    return rpcError(rpc.id, -32602, "Only Sepolia (chain ID 11155111) is supported.");
+  }
+  if (userOperationMethods.has(method)) {
+    const userOperation = rpc.params[0];
+    const entryPoint = rpc.params[1];
+    if (
+      !userOperation
+      || typeof userOperation !== "object"
+      || typeof entryPoint !== "string"
+      || entryPoint.toLowerCase() !== entryPoint07Address.toLowerCase()
+    ) {
+      return rpcError(rpc.id, -32602, "Only Sepolia EntryPoint v0.7 UserOperations are supported.");
+    }
+    if (!isAllowedMintBatch((userOperation as { callData?: unknown }).callData)) {
+      return rpcError(rpc.id, -32602, "Only a two-call ClassNFT mint batch is allowed.");
     }
   }
 
+  const apiKey = process.env.PIMLICO_API_KEY;
+  if (!apiKey) return rpcError(rpc.id, -32000, "Pimlico is not configured for this deployment.", 503);
+
   try {
-    const upstream = await fetch(`https://api.pimlico.io/v2/sepolia/rpc?apikey=${encodeURIComponent(apiKey)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-      signal: AbortSignal.timeout(25_000),
-    });
-    const result = await upstream.text();
-    return new Response(result, {
-      status: upstream.status,
-      headers: {
-        "Content-Type": upstream.headers.get("content-type") ?? "application/json",
-        "Cache-Control": "no-store",
+    const upstream = await fetch(
+      `https://api.pimlico.io/v2/sepolia/rpc?apikey=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+        signal: AbortSignal.timeout(25_000),
       },
-    });
-  } catch (error) {
-    console.error("Pimlico request failed", error);
-    return NextResponse.json(
-      { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32000, message: "Pimlico could not be reached. Please retry." } },
-      { status: 502 },
     );
+    const result: unknown = await upstream.json().catch(() => null);
+    if (!upstream.ok || !result || typeof result !== "object" || Array.isArray(result)) {
+      return rpcError(rpc.id, -32000, "Pimlico request failed. Please retry.", 502);
+    }
+    const response = result as { jsonrpc?: unknown; id?: unknown; result?: unknown; error?: unknown };
+    if (response.error !== undefined) {
+      return rpcError(rpc.id, -32000, "Pimlico could not process this request.", 502);
+    }
+    return NextResponse.json(
+      { jsonrpc: "2.0", id: rpc.id ?? null, result: response.result },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch {
+    return rpcError(rpc.id, -32000, "Pimlico could not be reached. Please retry.", 502);
   }
 }

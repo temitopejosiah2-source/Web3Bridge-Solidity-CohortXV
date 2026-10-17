@@ -1,17 +1,27 @@
 # Mintroom — Day 3 and Day 4 dApp
 
-Mintroom looks up `.eth` names, pins artwork through Pinata (IPFS), mints ClassNFTs on Sepolia, shows a live Chainlink ETH/USD price, batches two mints through an ERC-4337 smart account with Pimlico, and alerts on new contract mints.
+Mintroom looks up `.eth` names, pins artwork through Pinata (IPFS), mints ClassNFTs on Sepolia, shows a live Chainlink ETH/USD price, batches two mints through an ERC-4337 smart account with Pimlico, and alerts on new contract mints through the live page, browser push, and a standalone Telegram listener.
 
 **Live:** [https://mintroom.vercel.app](https://mintroom.vercel.app)
-The live app runs on Sepolia. `PINATA_JWT` and `PIMLICO_API_KEY` must be set in the Mintroom Vercel project's Production environment. The Pimlico key is only read by the server-side `/api/pimlico` proxy; it must never be put in `.env.local`, committed, or exposed as a `NEXT_PUBLIC_` variable.
+The live app runs on Sepolia. Server credentials are read only by server routes; `PIMLICO_API_KEY` is configured in Vercel and never exposed to browser code.
 
 ## What it does
 
 - **ENS:** a `.eth` box on the home page, plus every address shown as its primary ENS name when it has one (names are read from mainnet).
 - **IPFS:** files go to `/api/upload` on the server, which pins them with Pinata. The `ipfs://` URI is stored on-chain, and the gallery loads the image back through an IPFS HTTP gateway. IPFS content is public and permanent, so don’t upload private media.
 - **Chainlink:** Sepolia ETH/USD feed `0x694AA1769357215DE4FAC081bf1f309aDC325306`, polled on its own, with how old the round is. Each NFT card shows the live USD reference value of 1 ETH; the mint form estimates and reports the network fee in USD. ClassNFT mints are free and have no market price.
-- **Smart-account batch:** on the Gallery page, select an image and choose **Gasless batch · mint twice**. The connected wallet signs one ERC-4337 UserOperation from a counterfactual Simple Smart Account; it calls `ClassNFT.mint` twice with the same metadata URI. UserOperation fees come from Pimlico's Sepolia gas-price API, and the server requests paymaster sponsorship. Sponsorship depends on the Pimlico Sepolia paymaster being funded and its policy allowing this contract and call.
-- **Live alerts:** open [/activity](https://mintroom.vercel.app/activity) to load recent `Minted` events and poll for new ones while the page remains open. Enable browser notifications with the button on that page; event recipients are resolved to ENS names when available.
+- **Smart-account batch:** on the Gallery page, select an image and choose **Gasless batch · mint twice**. The connected wallet signs one ERC-4337 UserOperation from a counterfactual Simple Smart Account; it calls `ClassNFT.mint` twice with the same metadata URI. All bundler and paymaster JSON-RPC calls pass through the same-origin, rate-limited `/api/pimlico` proxy, which adds the server-side key and only permits Sepolia EntryPoint v0.7 two-mint calls. The UI shows the pending → included → confirmed lifecycle and links to the transaction.
+- **Live alerts:** open [/activity](https://mintroom.vercel.app/activity) to load recent `Minted` events and poll for new ones while the page remains open. Enable in-page/browser alerts or **Enable background alerts** to subscribe the browser to Web Push; addresses use their ENS name where available.
+- **Always-on listener:** the standalone Node listener catches up over confirmed contract events, stores its block cursor and bounded dedupe set in ignored `listener/state.json`, then sends new mints to Telegram and the protected Web Push endpoint. Push subscriptions live in Upstash Redis, not on the Vercel filesystem.
+
+## Architecture
+
+```text
+User + wallet → smart account → /api/pimlico → Pimlico bundler → EntryPoint → ClassNFT
+ClassNFT Minted → standalone listener → Telegram
+                                  └──→ /api/push/send → Web Push → subscribed browser
+Browser → /api/push/subscribe or /unsubscribe → Upstash Redis
+```
 
 ### UserOperation explorer record
 
@@ -34,6 +44,23 @@ npm run dev
 
 Open http://localhost:3000 — use a phone or a narrow window to check the layout.
 
+### Configure Web Push, Telegram, and Upstash
+
+1. Generate VAPID key pairs yourself with `npx web-push generate-vapid-keys`. Put the public key in `NEXT_PUBLIC_VAPID_PUBLIC_KEY` and the private key in `VAPID_PRIVATE_KEY`; set `VAPID_SUBJECT` to a contact such as `mailto:you@example.com`. Never commit or publish the private key.
+2. Create a Telegram bot by messaging [@BotFather](https://t.me/BotFather). Save its token as `TELEGRAM_BOT_TOKEN`, send the bot a message (for example `/start`), and obtain your chat ID from the Telegram Bot API `getUpdates` response; set it as `TELEGRAM_CHAT_ID`.
+3. Create a Redis database in [Upstash](https://console.upstash.com/), then copy its REST URL and REST token into `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+4. Set a long random `PUSH_NOTIFY_SECRET`. Use the same value in Vercel and in the listener environment. The listener also needs `SEPOLIA_RPC_URL` and `APP_URL` (for example `https://mintroom.vercel.app`).
+5. Copy `.env.example` to `.env.local` for local development and listener-only variables. The file is ignored by git. Do not put `PIMLICO_API_KEY` in it.
+
+Run the always-on listener in a separate terminal/process from the Next.js app:
+
+```bash
+cd frontend
+npm run listener
+```
+
+The first run initializes `listener/state.json` at the current finalized Sepolia block; subsequent runs backfill from its saved block in chunks of at most 2,000 blocks and only process events at least two confirmations deep. Keep the listener process running on your laptop or a Node host (such as Railway, Fly.io, or Render); Vercel serverless functions are not the listener. To backfill earlier history, stop the listener and lower `lastProcessedBlock` in its local ignored state file.
+
 ## Contracts (Sepolia)
 
 | What | Address | Etherscan |
@@ -51,16 +78,27 @@ forge script script/DeployClassNFT.s.sol --rpc-url $SEPOLIA_RPC_URL --broadcast
 
 | Name | Where it lives |
 | --- | --- |
-| `PINATA_JWT` | **Server only** (`frontend/.env.local` and Vercel env). Never `NEXT_PUBLIC_`. |
-| `PIMLICO_API_KEY` | **Vercel Production only**. Never add it to `.env.local`, git, or a `NEXT_PUBLIC_` variable; `/api/pimlico` proxies the allowed Sepolia UserOperation RPC calls. |
-| `NEXT_PUBLIC_NFT_ADDRESS` | Browser — optional override; defaults to the deployed ClassNFT on Sepolia |
-| `NEXT_PUBLIC_SEPOLIA_RPC_URL` | Browser — reads/writes on Sepolia |
-| `NEXT_PUBLIC_MAINNET_RPC_URL` | Browser — ENS reads |
-| `NEXT_PUBLIC_IPFS_GATEWAY` | Browser — optional preferred gateway for reading IPFS content |
+| `PINATA_JWT` | Server only; Vercel and local `.env.local` for uploads. |
+| `PIMLICO_API_KEY` | Vercel server environment only. Never add it to `.env.local`, git, or a `NEXT_PUBLIC_` variable. |
+| `NEXT_PUBLIC_NFT_ADDRESS` | Browser; optional contract override (defaults to the deployed ClassNFT). |
+| `NEXT_PUBLIC_SEPOLIA_RPC_URL` | Browser Sepolia reads/writes; configure in Vercel. |
+| `NEXT_PUBLIC_MAINNET_RPC_URL` | Browser ENS reads; configure in Vercel. |
+| `NEXT_PUBLIC_IPFS_GATEWAY` | Browser; optional preferred IPFS gateway. |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | Browser; public VAPID key used to create push subscriptions. |
+| `VAPID_PRIVATE_KEY` | Vercel server only; private VAPID key. |
+| `VAPID_SUBJECT` | Vercel server only; VAPID contact URI such as `mailto:you@example.com`. |
+| `PUSH_NOTIFY_SECRET` | Vercel server and listener; same secret protects `/api/push/send`. |
+| `UPSTASH_REDIS_REST_URL` | Vercel server only; Upstash Redis REST URL for subscriptions. |
+| `UPSTASH_REDIS_REST_TOKEN` | Vercel server only; Upstash Redis REST token. |
+| `SEPOLIA_RPC_URL` | Listener host/local `.env.local`; Sepolia RPC used by the standalone listener. |
+| `TELEGRAM_BOT_TOKEN` | Listener host/local `.env.local`; keep private. |
+| `TELEGRAM_CHAT_ID` | Listener host/local `.env.local`; destination for bot messages. |
+| `APP_URL` | Listener host/local `.env.local`; deployed app origin, without a trailing slash. |
+| `MAINNET_RPC_URL` | Optional listener mainnet RPC for ENS; falls back to `NEXT_PUBLIC_MAINNET_RPC_URL` or a public RPC. |
 
-For local development, put these values in `frontend/.env.local` (not under `src/`). On Vercel, set the **Root Directory** to `frontend` and add the required names in Project Settings → Environment Variables.
+For Vercel, set the **Root Directory** to `frontend` and add the Vercel/server/browser values above in Project Settings → Environment Variables. Add secrets to Production (and Preview only if you need push there). `PIMLICO_API_KEY`, `VAPID_PRIVATE_KEY`, `PUSH_NOTIFY_SECRET`, and the Upstash token must remain server-side; only the VAPID public key is intentionally public. Add listener variables to the environment of the separate Node process, not as Vercel build-time secrets.
 
-Do not add `PIMLICO_API_KEY` to the local environment file. Configure it only in Vercel's Production environment, then redeploy. In the Pimlico dashboard, configure a Sepolia sponsorship policy and budget limited to the ClassNFT mint action; this prevents the public API proxy from sponsoring arbitrary operations.
+In the Pimlico dashboard, configure a Sepolia sponsorship policy and budget limited to the ClassNFT mint action. The API proxy also restricts the allowed UserOperation target and calls; its per-IP sliding-window rate limit is in-memory and therefore best-effort per serverless instance.
 
 ## Why is the Pinata key in a server route?
 
@@ -71,9 +109,10 @@ Pinata's key can upload files to your account and consume your quota, so it must
 1. Import this GitHub repo.
 2. Root Directory: `frontend`.
 3. Add env vars (values in the Vercel dashboard, not in git).
-4. Set `PIMLICO_API_KEY` only in the Vercel Production environment, create a Pimlico Sepolia sponsorship policy for the ClassNFT mint, and redeploy. Confirm a successful two-mint batch, then add its Etherscan transaction link above.
-5. Open the URL on a phone, connect a detected browser wallet, look up `vitalik.eth`, mint a picture, confirm it appears from IPFS, and wait for the price line to tick. Visit `/activity`, enable browser notifications, and mint from another wallet to see the alert.
+4. Add the server-side and public Web Push variables from the table above, create a Pimlico Sepolia sponsorship policy for ClassNFT minting, and redeploy.
+5. Create a Telegram bot and Upstash database, set up the listener's separate environment, then start `npm run listener` on an always-on Node host.
+6. Open the URL on a phone, connect a wallet, and visit `/activity`. Test **Enable background alerts** and mint from another wallet to verify page-open and push alerts.
 
-### What a production alert system would do
+### What would a real product do when the page is closed?
 
-The browser listener is only alive while the Activity page is open, so it can miss events while a user is offline. A real product would run a durable backend indexer or event worker continuously, persist its last processed block and deduplicate by transaction hash and log index, then queue delivery. It would send notifications through Web Push (with a service worker and user consent), email, or an in-app inbox, while the page reads the persisted event feed.
+The in-page listener only runs while `/activity` is open and can miss mints while a user is away. This build adds an external always-on Node listener that catches up from persisted block state and sends each `Minted` event to Telegram and subscribed browsers through Web Push, with subscriptions stored in Upstash Redis. The service worker can display push notifications while the page is closed, while `/activity` remains the live feed when open.

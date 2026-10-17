@@ -14,9 +14,10 @@ import { shrinkImage } from "@/lib/image";
 
 type BatchResult = {
   userOperationHash: Hash;
-  transactionHash: Hash;
+  transactionHash?: Hash;
   smartAccount: `0x${string}`;
   tokenIds: string[];
+  status: "pending" | "included" | "confirmed";
 };
 
 function messageFromError(error: unknown) {
@@ -112,8 +113,14 @@ export function SmartAccountBatchMint({
         calls: [mintCall, mintCall],
         paymaster: true,
       });
+      setResult({
+        userOperationHash,
+        smartAccount: account.address,
+        tokenIds: [],
+        status: "pending",
+      });
 
-      setStatus("Waiting for the two-mint UserOperation to confirm on Sepolia…");
+      setStatus("UserOperation pending. Waiting for inclusion on Sepolia…");
       const receipt = await smartAccountClient.waitForUserOperationReceipt({
         hash: userOperationHash,
         timeout: 180_000,
@@ -122,6 +129,12 @@ export function SmartAccountBatchMint({
         throw new Error("The UserOperation did not succeed on-chain. Check its hash before retrying.");
       }
 
+      setResult((current) => current ? {
+        ...current,
+        transactionHash: receipt.receipt.transactionHash,
+        status: "included",
+      } : current);
+      setStatus("UserOperation included. Waiting for one confirmation…");
       const events = parseEventLogs({
         abi: nftAbi,
         logs: receipt.receipt.logs,
@@ -135,8 +148,15 @@ export function SmartAccountBatchMint({
         transactionHash: receipt.receipt.transactionHash,
         smartAccount: account.address,
         tokenIds: events.map((event) => event.args.tokenId.toString()),
+        status: "included",
       });
-      setStatus("Both NFTs were minted by one smart-account UserOperation.");
+      await publicClient.waitForTransactionReceipt({
+        hash: receipt.receipt.transactionHash,
+        confirmations: 2,
+        timeout: 180_000,
+      });
+      setResult((current) => current ? { ...current, status: "confirmed" } : current);
+      setStatus("UserOperation confirmed. Both NFTs were minted by one smart-account operation.");
     } catch (caught) {
       setError(true);
       setStatus(messageFromError(caught));
@@ -176,17 +196,27 @@ export function SmartAccountBatchMint({
         One signed UserOperation sends two mint calls through a Sepolia smart account. Pimlico sponsors gas when the project paymaster policy allows it.
       </p>
       {configured === false && (
-        <p className="field-error" role="status">Smart-account mint is not configured yet. Add PIMLICO_API_KEY to the Vercel Production environment and redeploy.</p>
+        <p className="field-error" role="status">Smart-account mint is not configured yet. Add the server-only Pimlico key in Vercel Production and redeploy.</p>
       )}
       {status && <p className={`status-line${error ? " error-message" : result ? " success-message" : ""}`} role={error ? "alert" : "status"} aria-live="polite">{status}</p>}
       {result && (
         <div className="smart-account-result" role="status">
+          <p><b>UserOperation status</b> {result.status}</p>
+          <ol className="user-operation-status" aria-label={`UserOperation ${result.status}`}>
+            {(["pending", "included", "confirmed"] as const).map((step) => (
+              <li className={result.status === step ? "active" : ["pending", "included", "confirmed"].indexOf(step) < ["pending", "included", "confirmed"].indexOf(result.status) ? "complete" : ""} key={step}>
+                {step}
+              </li>
+            ))}
+          </ol>
           <p><b>Smart account</b> {result.smartAccount}</p>
-          <p><b>Minted tokens</b> #{result.tokenIds.join(" and #")}</p>
           <p className="result-uri"><b>UserOperation hash</b> {result.userOperationHash}</p>
-          <a className="inline-link" href={`https://sepolia.etherscan.io/tx/${result.transactionHash}`} target="_blank" rel="noreferrer">
-            View UserOperation transaction on Etherscan ↗
-          </a>
+          {result.tokenIds.length > 0 && <p><b>Minted tokens</b> #{result.tokenIds.join(" and #")}</p>}
+          {result.transactionHash && (
+            <a className="inline-link" href={`https://sepolia.etherscan.io/tx/${result.transactionHash}`} target="_blank" rel="noreferrer">
+              View UserOperation transaction on Etherscan ↗
+            </a>
+          )}
         </div>
       )}
     </div>

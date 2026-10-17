@@ -19,10 +19,28 @@ type MintAlert = {
 
 const MAX_ALERTS = 50;
 
+function decodeVapidKey(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const decoded = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function responseError(response: Response, fallback: string) {
+  const body = await response.json().catch(() => null) as { error?: unknown } | null;
+  return typeof body?.error === "string" ? body.error : fallback;
+}
+
 export function LiveAlerts() {
   const publicClient = usePublicClient({ chainId: sepolia.id });
   const [alerts, setAlerts] = useState<MintAlert[]>([]);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState("");
   const [watchError, setWatchError] = useState("");
   const seen = useRef(new Set<string>());
   const lastScannedBlock = useRef<bigint | undefined>(undefined);
@@ -33,6 +51,14 @@ export function LiveAlerts() {
         ? Notification.permission
         : "unsupported",
     );
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.getRegistration("/").then(async (registration) => {
+        const subscription = await registration?.pushManager.getSubscription();
+        setPushEnabled(Boolean(subscription));
+      }).catch((caught: unknown) => {
+        setPushError(caught instanceof Error ? caught.message : "Could not check background-alert status.");
+      });
+    }
   }, []);
 
   const addLogs = useCallback((logs: readonly {
@@ -128,11 +154,65 @@ export function LiveAlerts() {
   }, [addLogs, publicClient]);
 
   async function enableNotifications() {
-    if (!("Notification" in window)) {
-      setNotificationPermission("unsupported");
-      return;
+    setPushBusy(true);
+    setPushError("");
+    try {
+      if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setNotificationPermission("unsupported");
+        throw new Error("This browser does not support Web Push notifications.");
+      }
+      const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      if (!publicKey) throw new Error("Background alerts are not configured for this deployment.");
+
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission !== "granted") throw new Error("Allow notifications in your browser to enable background alerts.");
+
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: decodeVapidKey(publicKey),
+      });
+      const response = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      });
+      if (!response.ok) {
+        await subscription.unsubscribe();
+        throw new Error(await responseError(response, "Could not save your push subscription."));
+      }
+      setPushEnabled(true);
+    } catch (caught) {
+      setPushError(caught instanceof Error ? caught.message : "Could not enable background alerts.");
+    } finally {
+      setPushBusy(false);
     }
-    setNotificationPermission(await Notification.requestPermission());
+  }
+
+  async function disableNotifications() {
+    setPushBusy(true);
+    setPushError("");
+    try {
+      const registration = await navigator.serviceWorker.getRegistration("/");
+      const subscription = await registration?.pushManager.getSubscription();
+      if (!subscription) {
+        setPushEnabled(false);
+        return;
+      }
+      const response = await fetch("/api/push/unsubscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      });
+      if (!response.ok) throw new Error(await responseError(response, "Could not remove your push subscription."));
+      await subscription.unsubscribe();
+      setPushEnabled(false);
+    } catch (caught) {
+      setPushError(caught instanceof Error ? caught.message : "Could not disable background alerts.");
+    } finally {
+      setPushBusy(false);
+    }
   }
 
   return (
@@ -158,8 +238,18 @@ export function LiveAlerts() {
               {notificationPermission === "denied" ? "Allow alerts in browser settings" : "Enable browser alerts"}
             </button>
           )}
+          {pushEnabled ? (
+            <button className="secondary-action" type="button" onClick={disableNotifications} disabled={pushBusy}>
+              {pushBusy ? "Disabling…" : "Disable background alerts"}
+            </button>
+          ) : (
+            <button className="secondary-action" type="button" onClick={enableNotifications} disabled={pushBusy}>
+              {pushBusy ? "Enabling…" : "Enable background alerts"}
+            </button>
+          )}
         </div>
 
+        {pushError && <p className="activity-error" role="alert">{pushError}</p>}
         {watchError && <p className="activity-error" role="status">{watchError} · Retrying automatically.</p>}
 
         {alerts.length === 0 ? (

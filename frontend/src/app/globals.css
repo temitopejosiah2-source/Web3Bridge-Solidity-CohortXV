@@ -65,7 +65,7 @@ a { color: inherit; }
 .live-event-indicator { display: inline-flex; align-items: center; gap: 7px; border: 1px solid #dfe5db; border-radius: 999px; background: white; padding: 8px 11px; color: #526451; font-size: 10px; font-weight: 800; }
 .live-event-indicator .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #70a848; box-shadow: 0 0 0 3px #e8f1df; }
 .activity-panel { overflow: hidden; }
-.activity-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; border: 1px solid var(--line); border-radius: 10px; background: #fafbf8; padding: 12px; }
+.activity-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; border: 1px solid var(--line); border-radius: 10px; background: #fafbf8; padding: 12px; }
 .activity-contract { margin: 0; color: var(--muted); font-size: 11px; }
 .activity-contract a { color: #435d40; font-weight: 800; text-underline-offset: 3px; }
 .notification-state { color: #486248; font-size: 10px; font-weight: 800; }
@@ -89,6 +89,9 @@ a { color: inherit; }
 .smart-account-result { display: grid; gap: 5px; border-left: 3px solid var(--acid-dark); padding: 7px 0 7px 11px; color: #526451; font-size: 10px; overflow-wrap: anywhere; }
 .smart-account-result p { margin: 0; }
 .smart-account-result .inline-link { font-size: 10px; }
+.user-operation-status { display: flex; gap: 16px; margin: 3px 0; padding: 0; list-style: none; text-transform: capitalize; }
+.user-operation-status li { color: #899287; }
+.user-operation-status li.active, .user-operation-status li.complete { color: #3f6037; font-weight: 800; }
 
 .app-main { width: min(1160px, 100%); margin: 0 auto; padding: 34px 24px 72px; }
 .page-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 26px; }
